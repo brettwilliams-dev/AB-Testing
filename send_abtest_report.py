@@ -1,6 +1,5 @@
 import os
 import json
-import math
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -27,7 +26,7 @@ DAYS_BACK = int(os.getenv("DAYS_BACK", "2"))              # pull last N days inc
 CONTROL_LABEL = os.getenv("CONTROL_LABEL", "Original")    # how control is labeled in your table
 TEST_KEY_COL = os.getenv("TEST_KEY_COL", "abtasty_campaign_sp")      # test grouping key
 VARIANT_COL = os.getenv("VARIANT_COL", "abtasty_variation_sp")       # variant/control column
-PROPERTY_COL = os.getenv("PROPERTY_COL", "property")                # optional metadata
+PROPERTY_COL = os.getenv("PROPERTY_COL", "property")                 # optional metadata
 
 # Rule thresholds for categories
 GOOD_THRESH = float(os.getenv("GOOD_THRESH", "0.05"))   # +5% or greater → "Good"
@@ -86,11 +85,10 @@ def _fmt_int(x):
 
 def compute_lifts(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Pair each variant with control within a test, compute lifts for:
-    - conversion_rate
-    - start_rate
-    - completion_rate
-    Keep original counts for context (sessions, submits, form_starts).
+    Build a combined table with BOTH control and variant rows:
+      - Variant rows include lifts vs the matching control.
+      - Control rows have blank lift columns.
+    Keeps original counts for context.
     """
     if df.empty:
         return df
@@ -99,101 +97,136 @@ def compute_lifts(df: pd.DataFrame) -> pd.DataFrame:
     ctrl = df[df[VARIANT_COL] == CONTROL_LABEL].copy()
     var  = df[df[VARIANT_COL] != CONTROL_LABEL].copy()
 
-    # Use (property, test_key) as composite, so cross-property tests remain separate
-    ctrl_index_cols = [PROPERTY_COL, TEST_KEY_COL]
-    ctrl = ctrl.set_index(ctrl_index_cols)
+    key_cols = [PROPERTY_COL, TEST_KEY_COL]
 
-    # Join variants to control on (property, test)
-    var = var.set_index(ctrl_index_cols)
-    joined = var.join(
-        ctrl[[ "sessions", "submits", "form_starts",
-               "start_rate", "completion_rate", "conversion_rate"]],
+    # Index for joining
+    ctrl_keyed = ctrl.set_index(key_cols)
+    var_keyed  = var.set_index(key_cols)
+
+    # Join variants to control (to bring in control rates)
+    joined = var_keyed.join(
+        ctrl_keyed[
+            ["sessions","submits","form_starts",
+             "start_rate","completion_rate","conversion_rate"]
+        ],
         how="left",
         rsuffix="_ctrl",
         lsuffix="_var"
     ).reset_index()
 
-    # Compute lifts
+    # Compute lifts on variants
     for metric in ["conversion_rate", "start_rate", "completion_rate"]:
         joined[f"{metric}_lift"] = (
-            (joined[f"{metric}_var"] - joined[f"{metric}_ctrl"]) /
-            joined[f"{metric}_ctrl"]
+            (joined.get(f"{metric}_var") - joined.get(f"{metric}_ctrl")) /
+            joined.get(f"{metric}_ctrl")
         )
 
-    # Simple categorization by conversion_rate_lift
-    def categorize(lift):
-        if pd.isna(lift):
-            return "Neutral"
-        if lift >= GOOD_THRESH:
-            return "Good"
-        if lift <= BAD_THRESH:
-            return "Bad"
+    # Category by CVR lift
+    def categorize(l):
+        if pd.isna(l): return "Neutral"
+        if l >= GOOD_THRESH: return "Good"
+        if l <= BAD_THRESH:  return "Bad"
         return "Neutral"
 
     joined["category"] = joined["conversion_rate_lift"].apply(categorize)
 
-    # Nicely formatted columns for the HTML table
-    out = joined[[
-        PROPERTY_COL,
-        TEST_KEY_COL,
-        VARIANT_COL,
-        "sessions_var", "submits_var", "form_starts_var",
-        "conversion_rate_ctrl", "conversion_rate_var", "conversion_rate_lift",
-        "start_rate_ctrl",      "start_rate_var",      "start_rate_lift",
-        "completion_rate_ctrl", "completion_rate_var", "completion_rate_lift",
+    # ---- Normalize columns for VARIANT rows (presentation names)
+    var_out = joined[[
+        PROPERTY_COL, TEST_KEY_COL, VARIANT_COL,
+        "sessions_var","form_starts_var","submits_var",
+        "conversion_rate_ctrl","conversion_rate_var","conversion_rate_lift",
+        "start_rate_ctrl","start_rate_var","start_rate_lift",
+        "completion_rate_ctrl","completion_rate_var","completion_rate_lift",
         "category"
     ]].copy()
 
-    # Create presentation columns
-    out["sessions"]      = out["sessions_var"].apply(_fmt_int)
-    out["submits"]       = out["submits_var"].apply(_fmt_int)
-    out["form_starts"]   = out["form_starts_var"].apply(_fmt_int)
-
-    out["conv_ctrl"]     = out["conversion_rate_ctrl"].apply(_fmt_pct)
-    out["conv_var"]      = out["conversion_rate_var"].apply(_fmt_pct)
-    out["conv_lift"]     = out["conversion_rate_lift"].apply(_fmt_pct)
-
-    out["start_ctrl"]    = out["start_rate_ctrl"].apply(_fmt_pct)
-    out["start_var"]     = out["start_rate_var"].apply(_fmt_pct)
-    out["start_lift"]    = out["start_rate_lift"].apply(_fmt_pct)
-
-    out["comp_ctrl"]     = out["completion_rate_ctrl"].apply(_fmt_pct)
-    out["comp_var"]      = out["completion_rate_var"].apply(_fmt_pct)
-    out["comp_lift"]     = out["completion_rate_lift"].apply(_fmt_pct)
-
-    # Final column order for the email table
-    out = out.rename(columns={
+    var_out = var_out.rename(columns={
         PROPERTY_COL: "property",
         TEST_KEY_COL: "test",
         VARIANT_COL: "variant"
     })
 
-    out = out[[
-        "property", "test", "variant",
-        "sessions", "form_starts", "submits",
-        "conv_ctrl", "conv_var", "conv_lift",
-        "start_ctrl","start_var","start_lift",
-        "comp_ctrl", "comp_var", "comp_lift",
-        "category"
-    ]].sort_values(["category", "property", "test", "variant"])
+    # ---- Build CONTROL rows with blank lifts
+    ctrl_tmp = ctrl_keyed.reset_index()
+    ctrl_out = ctrl_tmp[[
+        PROPERTY_COL, TEST_KEY_COL, VARIANT_COL,
+        "sessions","form_starts","submits",
+        "conversion_rate","start_rate","completion_rate"
+    ]].copy()
 
-    return out
+    ctrl_out["conversion_rate_lift"] = None
+    ctrl_out["start_rate_lift"] = None
+    ctrl_out["completion_rate_lift"] = None
+    ctrl_out["category"] = "Control"
+
+    ctrl_out = ctrl_out.rename(columns={
+        PROPERTY_COL: "property",
+        TEST_KEY_COL: "test",
+        VARIANT_COL: "variant",
+        "sessions": "sessions_var",
+        "form_starts": "form_starts_var",
+        "submits": "submits_var",
+        "conversion_rate": "conversion_rate_ctrl",
+        "start_rate": "start_rate_ctrl",
+        "completion_rate": "completion_rate_ctrl"
+    })
+
+    # For control rows, "var" columns should be blank
+    ctrl_out["conversion_rate_var"] = None
+    ctrl_out["start_rate_var"] = None
+    ctrl_out["completion_rate_var"] = None
+
+    # Reorder columns same as variants and combine
+    ctrl_out = ctrl_out[var_out.columns]
+    combined = pd.concat([ctrl_out, var_out], ignore_index=True)
+
+    # ----- Formatting for the HTML table
+    combined["sessions"]    = combined["sessions_var"].apply(_fmt_int)
+    combined["form_starts"] = combined["form_starts_var"].apply(_fmt_int)
+    combined["submits"]     = combined["submits_var"].apply(_fmt_int)
+
+    combined["conv_ctrl"] = combined["conversion_rate_ctrl"].apply(_fmt_pct)
+    combined["conv_var"]  = combined["conversion_rate_var"].apply(_fmt_pct)
+    combined["conv_lift"] = combined["conversion_rate_lift"].apply(_fmt_pct)
+
+    combined["start_ctrl"] = combined["start_rate_ctrl"].apply(_fmt_pct)
+    combined["start_var"]  = combined["start_rate_var"].apply(_fmt_pct)
+    combined["start_lift"] = combined["start_rate_lift"].apply(_fmt_pct)
+
+    combined["comp_ctrl"] = combined["completion_rate_ctrl"].apply(_fmt_pct)
+    combined["comp_var"]  = combined["completion_rate_var"].apply(_fmt_pct)
+    combined["comp_lift"] = combined["completion_rate_lift"].apply(_fmt_pct)
+
+    # Final ordered cols (keep both control + variant)
+    combined = combined[[
+        "property","test","variant",
+        "sessions","form_starts","submits",
+        "conv_ctrl","conv_var","conv_lift",
+        "start_ctrl","start_var","start_lift",
+        "comp_ctrl","comp_var","comp_lift",
+        "category"
+    ]]
+
+    # Sort: Controls first, then Good/Neutral/Bad variants; within that by property/test
+    order = pd.Categorical(combined["category"], ["Control","Good","Neutral","Bad"])
+    combined = combined.assign(_sort=order).sort_values(
+        ["property","test","_sort","variant"]
+    ).drop(columns="_sort")
+
+    return combined
 
 def to_html_table(df: pd.DataFrame) -> str:
-    """Render a compact HTML table with light styling and green/red lift colors."""
+    """Render a compact HTML table with green/red lift colors (variants only)."""
     if df.empty:
-        return "<p><em>No variant rows found in the selected window.</em></p>"
+        return "<p><em>No variant/control rows found in the selected window.</em></p>"
 
-    # Add CSS classes for lift coloring
     def lift_class(val: str):
         if not val or not val.endswith("%"):
             return ""
         try:
             num = float(val.replace("%","")) / 100.0
-            if num >= GOOD_THRESH:
-                return "good"
-            if num <= BAD_THRESH:
-                return "bad"
+            if num >= GOOD_THRESH: return "good"
+            if num <= BAD_THRESH:  return "bad"
             return ""
         except Exception:
             return ""
@@ -203,7 +236,6 @@ def to_html_table(df: pd.DataFrame) -> str:
     styled["_start_cls"] = styled["start_lift"].apply(lift_class)
     styled["_comp_cls"]  = styled["comp_lift"].apply(lift_class)
 
-    # Build HTML rows manually so we can inject classes
     cols = [
         ("Property","property"),
         ("Test","test"),
@@ -261,15 +293,24 @@ def to_html_table(df: pd.DataFrame) -> str:
     return html
 
 def build_gpt_summary(df_for_gpt: pd.DataFrame) -> str:
-    """Send categorized results to GPT with your rules for Good/Bad/Neutral."""
+    """
+    Build an executive HTML summary via GPT:
+      - Analyze VARIANT rows only (ignore controls).
+      - Always lead with conversion-rate (CVR) lift.
+      - Group into Good / Bad / Neutral.
+      - Return ready-to-embed HTML (headings + bullets).
+    """
     if df_for_gpt.empty:
-        return "No in-flight variant data found in the selected window."
+        return "<p>No in-flight variant data found in the selected window.</p>"
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    # Give GPT concise, structured input (don’t dump gigantic tables).
-    # We pass just the essential fields per variant.
-    compact = df_for_gpt[[
+    # Only variants for analysis
+    variants_only = df_for_gpt[df_for_gpt["category"] != "Control"].copy()
+    if variants_only.empty:
+        return "<p>No variant rows to analyze (only controls in the window).</p>"
+
+    compact = variants_only[[
         "property","test","variant",
         "sessions","form_starts","submits",
         "conv_ctrl","conv_var","conv_lift",
@@ -277,29 +318,24 @@ def build_gpt_summary(df_for_gpt: pd.DataFrame) -> str:
         "comp_ctrl","comp_var","comp_lift",
         "category"
     ]]
+    records = compact.to_dict(orient="records")
 
-    # Convert to markdown table for readability inside the model
-    md_table = compact.to_markdown(index=False)
-
-    system_msg = (
-        "You are a senior CRO analyst writing an executive summary. "
-        "Be crisp, action-oriented, and avoid jargon."
-    )
+    system_msg = "You are a senior CRO analyst. Write concise, executive-ready summaries."
 
     user_msg = f"""
-Data from in-flight A/B tests (variants vs control) is below as a table.
-Use these rules to categorize by conversion rate lift:
-- Good: conv_lift >= {GOOD_THRESH*100:.1f}%
-- Bad:  conv_lift <= {BAD_THRESH*100:.1f}%
-- Neutral: otherwise
+You are given a list of A/B test VARIANT rows (controls are excluded in this list).
+Rules:
+- Group items by category using conversion-rate lift (CVR lift) thresholds:
+  * Good: conv_lift >= {GOOD_THRESH*100:.1f}%
+  * Bad:  conv_lift <= {BAD_THRESH*100:.1f}%
+  * Neutral: between them.
+- For each variant, ALWAYS start with CVR lift (e.g., '+8.2% CVR lift'), then succinctly explain the likely driver using start_lift and comp_lift (e.g., 'driven by completion rate').
+- Keep bullets very short (≤ 1 line).
+- End with a 'What’s Next' section with 2–3 bullets.
+- Output pure HTML only with <h3> headings and <ul><li> bullets. No markdown.
 
-For each category, list the most important tests (group by property → test → variant).
-For each item, give a one-line takeaway that calls out where the lift seems to come from
-(e.g., higher start rate, higher completion rate, or both) using the provided lifts.
-Keep it short and executive-friendly. Then end with 2-3 “What’s next” bullets.
-    
-Table:
-{md_table}
+Data (list of objects):
+{records}
 """
 
     resp = client.chat.completions.create(
@@ -309,23 +345,16 @@ Table:
             {"role": "user", "content": user_msg},
         ],
         temperature=0.3,
-        max_tokens=700,
+        max_tokens=900,
     )
 
-    return resp.choices[0].message.content.strip()
+    html = resp.choices[0].message.content.strip()
+    return html
 
-def send_email(summary_md: str, table_html: str):
-    """Send the summary + table via Gmail."""
+def send_email(summary_html: str, table_html: str):
+    """Send the summary + table via Gmail (summary already in HTML)."""
     if not EMAIL_SENDER or not EMAIL_PASSWORD or not EMAIL_RECIPIENTS:
         raise RuntimeError("Email sender/password/recipients not configured.")
-
-    # Convert markdown-style bullets to simple HTML (light touch)
-    summary_html = (
-        summary_md
-        .replace("\n\n", "<br><br>")
-        .replace("\n- ", "<br>• ")
-        .replace("\n", "<br>")
-    )
 
     html_body = f"""
     <html>
@@ -333,11 +362,10 @@ def send_email(summary_md: str, table_html: str):
         <div style="font-family: Arial, sans-serif; max-width: 980px;">
           <h2 style="margin-bottom: 6px;">In-Flight A/B Test Summary</h2>
           <div style="color:#555; font-size: 13px; margin-bottom: 14px;">
-            Window: last {DAYS_BACK} day(s). Categorization: Good &ge; {GOOD_THRESH*100:.0f}%, Bad &le; {BAD_THRESH*100:.0f}% (by conversion lift).
+            Window: last {DAYS_BACK} day(s). Categorization: Good ≥ {GOOD_THRESH*100:.0f}%, Bad ≤ {BAD_THRESH*100:.0f}% (by conversion lift).
           </div>
-          <div style="font-size: 14px; line-height: 1.5; margin-bottom: 18px;">
-            {summary_html}
-          </div>
+          {summary_html}
+          <div style="height:12px;"></div>
           {table_html}
         </div>
       </body>
@@ -356,17 +384,17 @@ def send_email(summary_md: str, table_html: str):
 
 def main():
     df = fetch_data()
-    # If your table occasionally has only control rows in the window, handle gracefully
-    if df.empty or (df[VARIANT_COL] == CONTROL_LABEL).all():
-        summary = "No variant activity in the selected window."
-        table_html = "<p><em>No rows to display.</em></p>"
-        send_email(summary, table_html)
+
+    if df.empty:
+        summary_html = "<p>No activity in the selected window.</p>"
+        table_html   = "<p><em>No rows to display.</em></p>"
+        send_email(summary_html, table_html)
         return
 
-    agg = compute_lifts(df)
-    summary = build_gpt_summary(agg)
-    table_html = to_html_table(agg)
-    send_email(summary, table_html)
+    agg = compute_lifts(df)               # includes BOTH control + variant rows
+    summary_html = build_gpt_summary(agg) # analyzes variants only; outputs HTML
+    table_html = to_html_table(agg)       # renders both control + variant rows
+    send_email(summary_html, table_html)
 
 if __name__ == "__main__":
     main()
