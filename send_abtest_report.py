@@ -23,7 +23,7 @@ EMAIL_RECIPIENTS = [r.strip() for r in os.getenv("EMAIL_RECIPIENTS", "").split("
 # Optional overrides
 DATE_FIELD = os.getenv("BQ_DATE_FIELD", "max_test_date")  # table field used to filter recency
 DAYS_BACK = int(os.getenv("DAYS_BACK", "2"))              # pull last N days incl. today
-CONTROL_LABEL = os.getenv("CONTROL_LABEL", "Original")    # how control is labeled in your table
+CONTROL_LABEL = os.getenv("CONTROL_LABEL", "[0] Original")    # how control is labeled in your table
 TEST_KEY_COL = os.getenv("TEST_KEY_COL", "abtasty_campaign_sp")      # test grouping key
 VARIANT_COL = os.getenv("VARIANT_COL", "abtasty_variation_sp")       # variant/control column
 PROPERTY_COL = os.getenv("PROPERTY_COL", "property")                 # optional metadata
