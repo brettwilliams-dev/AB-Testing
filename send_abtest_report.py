@@ -99,16 +99,17 @@ def compute_lifts(df: pd.DataFrame) -> pd.DataFrame:
     ctrl_keyed = ctrl.set_index(key_cols)
     var_keyed  = var.set_index(key_cols)
 
-    # Join variant with control
+    # Join variant with control rates; left side (variants) keeps the base names
     joined = var_keyed.join(
-        ctrl_keyed[["conversion_rate","start_rate","completion_rate"]],
-        how="left", rsuffix="_ctrl"
+        ctrl_keyed[["conversion_rate", "start_rate", "completion_rate"]],
+        how="left",
+        rsuffix="_ctrl"
     ).reset_index()
 
-    # Compute lifts
-    joined["conv_lift"] = (joined["conversion_rate_var"] - joined["conversion_rate_ctrl"]) / joined["conversion_rate_ctrl"]
-    joined["start_lift"] = (joined["start_rate_var"] - joined["start_rate_ctrl"]) / joined["start_rate_ctrl"]
-    joined["comp_lift"] = (joined["completion_rate_var"] - joined["completion_rate_ctrl"]) / joined["completion_rate_ctrl"]
+    # Compute lifts using base (variant) vs *_ctrl (control)
+    joined["conv_lift"]  = (joined["conversion_rate"]  - joined["conversion_rate_ctrl"])  / joined["conversion_rate_ctrl"]
+    joined["start_lift"] = (joined["start_rate"]       - joined["start_rate_ctrl"])       / joined["start_rate_ctrl"]
+    joined["comp_lift"]  = (joined["completion_rate"]  - joined["completion_rate_ctrl"])  / joined["completion_rate_ctrl"]
 
     def categorize(l):
         if pd.isna(l): return "Neutral"
@@ -117,17 +118,14 @@ def compute_lifts(df: pd.DataFrame) -> pd.DataFrame:
         return "Neutral"
     joined["category"] = joined["conv_lift"].apply(categorize)
 
-    # Normalize variant rows
+    # Normalize variant rows to final schema
     var_out = joined.rename(columns={
         PROPERTY_COL: "property",
         TEST_KEY_COL: "test",
         VARIANT_COL: "variant",
-        "sessions_var": "sessions",
-        "form_starts_var": "form_starts",
-        "submits_var": "submits",
-        "conversion_rate_var": "conversion_rate",
-        "start_rate_var": "start_rate",
-        "completion_rate_var": "completion_rate"
+        "sessions": "sessions",
+        "form_starts": "form_starts",
+        "submits": "submits"
     })[[
         "property","test","variant","sessions","form_starts","submits",
         "conversion_rate","conv_lift",
@@ -136,7 +134,7 @@ def compute_lifts(df: pd.DataFrame) -> pd.DataFrame:
         "category"
     ]]
 
-    # Control rows
+    # Control rows to same schema; lifts blank
     ctrl_out = ctrl.rename(columns={
         PROPERTY_COL: "property",
         TEST_KEY_COL: "test",
@@ -156,7 +154,7 @@ def compute_lifts(df: pd.DataFrame) -> pd.DataFrame:
 
     combined = pd.concat([ctrl_out, var_out], ignore_index=True)
 
-    # Format
+    # Format numbers
     combined["sessions"] = combined["sessions"].apply(_fmt_int)
     combined["form_starts"] = combined["form_starts"].apply(_fmt_int)
     combined["submits"] = combined["submits"].apply(_fmt_int)
