@@ -23,7 +23,7 @@ EMAIL_RECIPIENTS = [r.strip() for r in os.getenv("EMAIL_RECIPIENTS", "").split("
 # Optional overrides
 DATE_FIELD = os.getenv("BQ_DATE_FIELD", "max_test_date")  # table field used to filter recency
 DAYS_BACK = int(os.getenv("DAYS_BACK", "2"))              # pull last N days incl. today
-CONTROL_LABEL = os.getenv("CONTROL_LABEL", "[0] Original")    # how control is labeled in your table
+CONTROL_LABEL = os.getenv("CONTROL_LABEL", "Original")    # how control is labeled in your table
 TEST_KEY_COL = os.getenv("TEST_KEY_COL", "abtasty_campaign_sp")      # test grouping key
 VARIANT_COL = os.getenv("VARIANT_COL", "abtasty_variation_sp")       # variant/control column
 PROPERTY_COL = os.getenv("PROPERTY_COL", "property")                 # optional metadata
@@ -92,12 +92,33 @@ def compute_lifts(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    ctrl = df[df[VARIANT_COL] == CONTROL_LABEL].copy()
-    var  = df[df[VARIANT_COL] != CONTROL_LABEL].copy()
+    # Debug: Print unique variants to see what we're working with
+    print("DEBUG: Unique variants in data:", df[VARIANT_COL].unique())
+    print("DEBUG: Looking for control label:", CONTROL_LABEL)
+    
+    # More flexible control matching - check if CONTROL_LABEL is contained in the variant name
+    ctrl = df[df[VARIANT_COL].str.contains(CONTROL_LABEL, na=False)].copy()
+    var  = df[~df[VARIANT_COL].str.contains(CONTROL_LABEL, na=False)].copy()
+    
+    print("DEBUG: Found", len(ctrl), "control rows")
+    print("DEBUG: Found", len(var), "variant rows")
+    
+    if ctrl.empty:
+        print("WARNING: No control rows found! Check your CONTROL_LABEL setting.")
+        # Return original df with empty lift columns
+        result = df.copy()
+        result["conv_lift"] = None
+        result["start_lift"] = None  
+        result["comp_lift"] = None
+        result["category"] = "No Control Found"
+        return result
 
     key_cols = [PROPERTY_COL, TEST_KEY_COL]
     ctrl_keyed = ctrl.set_index(key_cols)
     var_keyed  = var.set_index(key_cols)
+
+    print("DEBUG: Control keys:", ctrl_keyed.index.tolist())
+    print("DEBUG: Variant keys:", var_keyed.index.tolist())
 
     # Join variant with control rates; left side (variants) keeps the base names
     joined = var_keyed.join(
@@ -106,10 +127,19 @@ def compute_lifts(df: pd.DataFrame) -> pd.DataFrame:
         rsuffix="_ctrl"
     ).reset_index()
 
+    print("DEBUG: Joined shape:", joined.shape)
+    print("DEBUG: Control rates found:", ~joined["conversion_rate_ctrl"].isna().sum())
+
     # Compute lifts using base (variant) vs *_ctrl (control)
-    joined["conv_lift"]  = (joined["conversion_rate"]  - joined["conversion_rate_ctrl"])  / joined["conversion_rate_ctrl"]
-    joined["start_lift"] = (joined["start_rate"]       - joined["start_rate_ctrl"])       / joined["start_rate_ctrl"]
-    joined["comp_lift"]  = (joined["completion_rate"]  - joined["completion_rate_ctrl"])  / joined["completion_rate_ctrl"]
+    # Handle division by zero and missing control rates
+    def safe_lift_calc(variant_rate, control_rate):
+        if pd.isna(variant_rate) or pd.isna(control_rate) or control_rate == 0:
+            return None
+        return (variant_rate - control_rate) / control_rate
+
+    joined["conv_lift"]  = joined.apply(lambda row: safe_lift_calc(row["conversion_rate"], row["conversion_rate_ctrl"]), axis=1)
+    joined["start_lift"] = joined.apply(lambda row: safe_lift_calc(row["start_rate"], row["start_rate_ctrl"]), axis=1)
+    joined["comp_lift"]  = joined.apply(lambda row: safe_lift_calc(row["completion_rate"], row["completion_rate_ctrl"]), axis=1)
 
     def categorize(l):
         if pd.isna(l): return "Neutral"
@@ -279,7 +309,7 @@ Rules:
   * Neutral: between them.
 - For each variant, ALWAYS start with CVR lift (e.g., '+8.2% CVR lift'), then explain the likely driver using start_lift and comp_lift.
 - Keep bullets very short (≤ 1 line).
-- End with a 'What’s Next' section with 2–3 bullets.
+- End with a 'What's Next' section with 2–3 bullets.
 - Output pure HTML only with <h3> headings and <ul><li> bullets. No markdown.
 
 Data (list of objects):
