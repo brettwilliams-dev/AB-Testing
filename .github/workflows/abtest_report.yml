@@ -1,0 +1,35 @@
+name: AB Test Report
+
+on:
+  schedule:
+    - cron: "30 12 * * 1-5"   # 7:30 AM CT during daylight savings
+  workflow_dispatch:  # allow manual runs
+
+jobs:
+  run-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install google-cloud-bigquery pandas openai
+
+      - name: Run AB Test Report
+        env:
+          NB_BQ_SERVICE_ACCOUNT_KEY: ${{ secrets.NB_BQ_SERVICE_ACCOUNT_KEY }}
+          BQ_PROJECT_ID: ${{ secrets.BQ_PROJECT_ID }}
+          BQ_DATASET: ${{ secrets.BQ_DATASET }}
+          BQ_TABLE: ${{ secrets.BQ_TABLE }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          EMAIL_RECIPIENTS: ${{ secrets.EMAIL_RECIPIENTS }}
+        run: |
+          python send_abtest_report.py
