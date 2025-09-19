@@ -19,9 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install google-cloud-bigquery pandas openai
-          pip install --upgrade pip
-          pip install google-cloud-bigquery pandas openai db-dtypes
+          pip install google-cloud-bigquery pandas openai db-dtypes tabulate
 
       - name: Run AB Test Report
         env:
