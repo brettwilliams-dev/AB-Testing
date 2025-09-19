@@ -76,7 +76,11 @@ def fetch_data():
 def _fmt_pct(x, places=1):
     if pd.isna(x):
         return ""
-    return f"{x*100:.{places}f}%"
+    pct_val = x * 100
+    if pct_val < 0:
+        return f"({abs(pct_val):.{places}f}%)"
+    else:
+        return f"{pct_val:.{places}f}%"
 
 def _fmt_int(x):
     if pd.isna(x):
